@@ -3,7 +3,7 @@ from __future__ import division, print_function
 
 import objc
 from os.path import dirname, join
-from GlyphsApp import Glyphs, UPDATEINTERFACE
+from GlyphsApp import Glyphs, UPDATEINTERFACE, GSNode, CURVE, OFFCURVE, LINE, GSPath
 from GlyphsApp.plugins import GSBackgroundImage, SelectTool
 
 from AppKit import NSBezierPath, NSBitmapImageRep, NSColor, \
@@ -17,6 +17,98 @@ default_pen_size = 2
 default_pixel_size = 2
 default_pixel_ratio = 1
 
+# add code here
+import os
+import subprocess
+from AppKit import NSImage, NSBMPFileType
+
+def convertPath():
+    layer = Glyphs.font.selectedLayers[0]
+    d=layer.userData["de.kutilek.scrawl.data"]
+    nsi = NSImage.alloc().initWithData_(d)
+    print(nsi.representations()[0])
+    data = (nsi.representations()[0]).representationUsingType_properties_(NSBMPFileType,None)
+    data.writeToFile_atomically_("/tmp/foo.bmp",False)
+    subprocess.call(["/usr/local/bin/potrace", "-s", "--flat", '-O', '5', "/tmp/foo.bmp"])
+    import re
+    with open("/tmp/foo.svg") as x: svg = x.read()
+    path = re.search('path d="(.*)"', svg, re.DOTALL).group(1)
+    lastcommand = ""
+    nodes = []
+
+    factor = 0.15
+
+    def handleCurve(rs, nodes,cursorx, cursory):
+      x1, y1 = (cursorx+int(rs.group(1))), (cursory+int(rs.group(2)))
+      nodes.append(GSNode((x1*factor,y1*factor),OFFCURVE))
+      x2, y2 = (cursorx+int(rs.group(3))), (cursory+int(rs.group(4)))
+      nodes.append(GSNode((x2*factor,y2*factor),OFFCURVE))
+      x, y = (cursorx+int(rs.group(5))), (cursory+int(rs.group(6)))
+      nodes.append(GSNode((x*factor,y*factor),CURVE))
+      cursorx, cursory = x,y
+      return cursorx, cursory
+
+    def handleLine(rs, nodes,cursorx, cursory):
+      x1, y1 = (cursorx+int(rs.group(1))), (cursory+int(rs.group(2)))
+      nodes.append(GSNode((x1*factor,y1*factor),LINE))
+      cursorx, cursory = x1,y1
+      return cursorx, cursory
+
+    while len(path) > 0:
+      rs = re.match('M\s*(\d+) (\d+)\s*',path)
+      if rs:
+        cursorx, cursory = int(rs.group(1)), int(rs.group(2))
+        nodes.append(GSNode((cursorx*factor,cursory*factor),CURVE))
+        path = path[rs.end():]
+        continue
+
+      rs = re.match('m\s*(-?\d+) (-?\d+)\s*',path)
+      if rs:
+        cursorx, cursory = cursorx+int(rs.group(1)), cursory+int(rs.group(2))
+        nodes.append(GSNode((cursorx*factor,cursory*factor),CURVE))
+        path = path[rs.end():]
+        continue
+
+      rs = re.match('c\s*(-?\d+)\s(-?\d+)\s(-?\d+)\s(-?\d+)\s(-?\d+)\s(-?\d+)\s*',path)
+      if rs:
+        cursorx, cursory = handleCurve(rs, nodes, cursorx, cursory)
+        path = path[rs.end():]
+        lastcommand = "c"
+        continue
+
+      rs = re.match('l\s*(-?\d+)\s(-?\d+)\s*',path)
+      if rs:
+        cursorx, cursory = handleLine(rs, nodes, cursorx, cursory)
+        path = path[rs.end():]
+        lastcommand = "l"
+        continue
+
+      rs = re.match('(-?\d+)\s(-?\d+)\s(-?\d+)\s(-?\d+)\s(-?\d+)\s(-?\d+)\s*',path)
+      if rs and lastcommand == "c":
+        cursorx, cursory = handleCurve(rs, nodes, cursorx, cursory)
+        path = path[rs.end():]
+        lastcommand = "c"
+        continue
+
+      rs = re.match('(-?\d+)\s(-?\d+)\s*',path)
+      if rs and lastcommand == "l":
+        cursorx, cursory = handleLine(rs, nodes, cursorx, cursory)
+        path = path[rs.end():]
+        continue
+
+      rs = re.match('z\s*',path)
+      if rs:
+        # Flush nodes
+        print(nodes)
+        p = GSPath()
+        p.nodes = nodes
+        layer.paths.append(p)
+        layer.cleanUpPaths()
+        nodes = []
+        path = path[rs.end():]
+        continue
+
+      raise ValueError("Couldn't parse "+path)
 
 def initImage(layer, width, height, pixel_size=default_pixel_size, ratio=1):
     # See https://developer.apple.com/documentation/appkit/nsbitmapimagerep/1395538-init
@@ -191,6 +283,8 @@ class ScrawlTool(SelectTool):
             self.erase = not(self.erase)
             self.prev_location = None
             self.updateView()
+        elif event.characters() == "r":
+            convertPath()
         elif event.characters() in ("1", "2", "3", "4", "5", "6", "7", "8", "9"):
             self.pen_size = int(event.characters()) * self.pixel_size
             self.w.pen_size.set(self.pen_size)
